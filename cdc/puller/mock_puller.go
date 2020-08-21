@@ -22,7 +22,6 @@ import (
 	"github.com/pingcap/kvproto/pkg/kvrpcpb"
 	"github.com/pingcap/log"
 	timodel "github.com/pingcap/parser/model"
-	"github.com/pingcap/ticdc/cdc/entry"
 	"github.com/pingcap/ticdc/cdc/model"
 	"github.com/pingcap/ticdc/pkg/regionspan"
 	"github.com/pingcap/tidb/domain"
@@ -128,7 +127,7 @@ var _ Puller = &mockPuller{}
 
 type mockPuller struct {
 	pm          *MockPullerManager
-	spans       []regionspan.Span
+	spans       []regionspan.ComparableSpan
 	resolvedTs  uint64
 	startTs     uint64
 	rawKVOffset int
@@ -149,7 +148,7 @@ func (p *mockPuller) SortedOutput(ctx context.Context) <-chan *model.RawKVEntry 
 					continue
 				}
 				p.resolvedTs = rawKV.StartTs
-				if !regionspan.KeyInSpans(rawKV.Key, p.spans, false) {
+				if !regionspan.KeyInSpans(rawKV.Key, p.spans) {
 					continue
 				}
 				select {
@@ -229,13 +228,12 @@ func (m *MockPullerManager) setUp(newRowFormat bool) {
 }
 
 // CreatePuller returns a mock puller with the specified start ts and spans
-func (m *MockPullerManager) CreatePuller(startTs uint64, spans []regionspan.Span) Puller {
-	//return &mockPuller{
-	//	spans:   spans,
-	//	pm:      m,
-	//	startTs: startTs,
-	//}
-	return nil
+func (m *MockPullerManager) CreatePuller(startTs uint64, spans []regionspan.ComparableSpan) Puller {
+	return &mockPuller{
+		spans:   spans,
+		pm:      m,
+		startTs: startTs,
+	}
 }
 
 // MustExec delegates to TestKit.MustExec
@@ -244,13 +242,13 @@ func (m *MockPullerManager) MustExec(sql string, args ...interface{}) {
 }
 
 // GetTableInfo queries the info schema with the table name and returns the TableInfo
-func (m *MockPullerManager) GetTableInfo(schemaName, tableName string) *entry.TableInfo {
+func (m *MockPullerManager) GetTableInfo(schemaName, tableName string) *model.TableInfo {
 	is := m.domain.InfoSchema()
 	tbl, err := is.TableByName(timodel.NewCIStr(schemaName), timodel.NewCIStr(tableName))
 	m.c.Assert(err, check.IsNil)
 	dbInfo, exist := is.SchemaByTable(tbl.Meta())
 	m.c.Assert(exist, check.IsTrue)
-	return entry.WrapTableInfo(dbInfo.ID, dbInfo.Name.O, tbl.Meta())
+	return model.WrapTableInfo(dbInfo.ID, dbInfo.Name.O, 0, tbl.Meta())
 }
 
 func (m *MockPullerManager) postPrewrite(req *kvrpcpb.PrewriteRequest, result []error) {

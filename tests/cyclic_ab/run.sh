@@ -35,6 +35,13 @@ function run() {
     run_cdc_cli changefeed cyclic create-marktables \
         --cyclic-upstream-dsn="root@tcp(${DOWN_TIDB_HOST}:${DOWN_TIDB_PORT})/"
 
+    # make sure create-marktables does not create mark table for mark table.
+    for c in $(seq 1 10); do {
+        # must not cause an error table name too long.
+        run_cdc_cli changefeed cyclic create-marktables \
+            --cyclic-upstream-dsn="root@tcp(${UP_TIDB_HOST}:${UP_TIDB_PORT})/"
+    } done
+
     # record tso after we create tables to not block on waiting mark tables DDLs.
     start_ts=$(run_cdc_cli tso query --pd=http://$UP_PD_HOST:$UP_PD_PORT)
 
@@ -87,7 +94,18 @@ function run() {
         run_sql "${sqldown}" ${DOWN_TIDB_HOST} ${DOWN_TIDB_PORT}
     } done;
 
+    # sync-diff creates table which may block cyclic replication.
+    # Sleep a while to make sure all changes has been replicated.
+    sleep 10
+
     check_sync_diff $WORK_DIR $CUR/conf/diff_config.toml
+
+    # At the time of writing, tso is at least 18 digits long in decimal format.
+    # $ pd-ctl tso 418252158551982113
+    # system:  2020-07-23 19:56:05.57 +0800 CST
+    # logic:  33
+    run_sql "SELECT start_timestamp FROM tidb_cdc.repl_mark_test_simple LIMIT 1;" ${DOWN_TIDB_HOST} ${DOWN_TIDB_PORT} && \
+    check_contains "start_timestamp: [0-9]{18,}"
 
     cleanup_process $CDC_BINARY
 }

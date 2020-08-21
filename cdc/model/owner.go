@@ -37,6 +37,7 @@ const (
 	AdminStop
 	AdminResume
 	AdminRemove
+	AdminFinish
 )
 
 // String implements fmt.Stringer interface.
@@ -50,8 +51,19 @@ func (t AdminJobType) String() string {
 		return "resume changefeed"
 	case AdminRemove:
 		return "remove changefeed"
+	case AdminFinish:
+		return "finish changefeed"
 	}
 	return "unknown"
+}
+
+// IsStopState returns whether changefeed is in stop state with give admin job
+func (t AdminJobType) IsStopState() bool {
+	switch t {
+	case AdminStop, AdminRemove, AdminFinish:
+		return true
+	}
+	return false
 }
 
 // TaskPosition records the process information of a capture
@@ -149,7 +161,6 @@ func (w *TaskWorkload) Marshal() (string, error) {
 type TableReplicaInfo struct {
 	StartTs     Ts      `json:"start-ts"`
 	MarkTableID TableID `json:"mark-table-id"`
-	Name        string  `json:"-"`
 }
 
 // TaskStatus records the task information of a capture
@@ -244,7 +255,6 @@ func (ts *TaskStatus) Snapshot(cfID ChangeFeedID, captureID CaptureID, checkpoin
 		snap.Tables[tableID] = &TableReplicaInfo{
 			StartTs:     ts,
 			MarkTableID: table.MarkTableID,
-			Name:        table.Name,
 		}
 	}
 	return snap

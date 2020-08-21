@@ -18,10 +18,9 @@ import (
 	"net/http"
 	"strconv"
 
-	"github.com/pingcap/ticdc/pkg/util"
-
 	"github.com/pingcap/errors"
 	"github.com/pingcap/ticdc/cdc/model"
+	"github.com/pingcap/tidb/store/tikv/oracle"
 	"go.etcd.io/etcd/clientv3/concurrency"
 )
 
@@ -41,6 +40,14 @@ type commonResp struct {
 	Message string `json:"message"`
 }
 
+// ChangefeedResp holds the most common usage information for a changefeed
+type ChangefeedResp struct {
+	FeedState    string              `json:"state"`
+	TSO          uint64              `json:"tso"`
+	Checkpoint   string              `json:"checkpoint"`
+	RunningError *model.RunningError `json:"error"`
+}
+
 func handleOwnerResp(w http.ResponseWriter, err error) {
 	if err != nil {
 		if errors.Cause(err) == concurrency.ErrElectionNotLeader {
@@ -58,8 +65,10 @@ func (s *Server) handleResignOwner(w http.ResponseWriter, req *http.Request) {
 		writeError(w, http.StatusBadRequest, errors.New("this api only supports POST method"))
 		return
 	}
+	s.ownerLock.RLock()
 	if s.owner == nil {
 		handleOwnerResp(w, concurrency.ErrElectionNoLeader)
+		s.ownerLock.RUnlock()
 		return
 	}
 	// Resign is a complex process that needs to be synchronized because
@@ -76,7 +85,8 @@ func (s *Server) handleResignOwner(w http.ResponseWriter, req *http.Request) {
 	s.owner.Close(req.Context(), func(ctx context.Context) error {
 		return s.capture.Resign(ctx)
 	})
-	s.owner = nil
+	s.ownerLock.RUnlock()
+	s.setOwner(nil)
 	handleOwnerResp(w, nil)
 }
 
@@ -86,6 +96,8 @@ func (s *Server) handleChangefeedAdmin(w http.ResponseWriter, req *http.Request)
 		return
 	}
 
+	s.ownerLock.RLock()
+	defer s.ownerLock.RUnlock()
 	if s.owner == nil {
 		handleOwnerResp(w, concurrency.ErrElectionNoLeader)
 	}
@@ -115,6 +127,8 @@ func (s *Server) handleRebalanceTrigger(w http.ResponseWriter, req *http.Request
 		return
 	}
 
+	s.ownerLock.RLock()
+	defer s.ownerLock.RUnlock()
 	if s.owner == nil {
 		handleOwnerResp(w, concurrency.ErrElectionNoLeader)
 	}
@@ -125,7 +139,7 @@ func (s *Server) handleRebalanceTrigger(w http.ResponseWriter, req *http.Request
 		return
 	}
 	changefeedID := req.Form.Get(APIOpVarChangefeedID)
-	if !util.IsValidUUIDv4(changefeedID) {
+	if err := model.ValidateChangefeedID(changefeedID); err != nil {
 		writeError(w, http.StatusBadRequest, errors.Errorf("invalid changefeed id: %s", changefeedID))
 		return
 	}
@@ -139,6 +153,8 @@ func (s *Server) handleMoveTable(w http.ResponseWriter, req *http.Request) {
 		return
 	}
 
+	s.ownerLock.RLock()
+	defer s.ownerLock.RUnlock()
 	if s.owner == nil {
 		handleOwnerResp(w, concurrency.ErrElectionNoLeader)
 	}
@@ -149,12 +165,12 @@ func (s *Server) handleMoveTable(w http.ResponseWriter, req *http.Request) {
 		return
 	}
 	changefeedID := req.Form.Get(APIOpVarChangefeedID)
-	if !util.IsValidUUIDv4(changefeedID) {
+	if err := model.ValidateChangefeedID(changefeedID); err != nil {
 		writeError(w, http.StatusBadRequest, errors.Errorf("invalid changefeed id: %s", changefeedID))
 		return
 	}
 	to := req.Form.Get(APIOpVarTargetCaptureID)
-	if !util.IsValidUUIDv4(to) {
+	if err := model.ValidateChangefeedID(to); err != nil {
 		writeError(w, http.StatusBadRequest, errors.Errorf("invalid target capture id: %s", to))
 		return
 	}
@@ -166,4 +182,52 @@ func (s *Server) handleMoveTable(w http.ResponseWriter, req *http.Request) {
 	}
 	s.owner.ManualSchedule(changefeedID, to, tableID)
 	handleOwnerResp(w, nil)
+}
+
+func (s *Server) handleChangefeedQuery(w http.ResponseWriter, req *http.Request) {
+	if req.Method != http.MethodPost {
+		writeError(w, http.StatusBadRequest, errors.New("this api only supports POST method"))
+		return
+	}
+	s.ownerLock.RLock()
+	defer s.ownerLock.RUnlock()
+	if s.owner == nil {
+		handleOwnerResp(w, concurrency.ErrElectionNoLeader)
+	}
+
+	err := req.ParseForm()
+	if err != nil {
+		writeInternalServerError(w, err)
+		return
+	}
+	changefeedID := req.Form.Get(APIOpVarChangefeedID)
+	if err := model.ValidateChangefeedID(changefeedID); err != nil {
+		writeError(w, http.StatusBadRequest, errors.Errorf("invalid changefeed id: %s", changefeedID))
+		return
+	}
+	cf, status, feedState, err := s.owner.collectChangefeedInfo(req.Context(), changefeedID)
+	if err != nil && errors.Cause(err) != model.ErrChangeFeedNotExists {
+		writeInternalServerError(w, err)
+		return
+	}
+	feedInfo, err := s.owner.etcdClient.GetChangeFeedInfo(req.Context(), changefeedID)
+	if err != nil && errors.Cause(err) != model.ErrChangeFeedNotExists {
+		writeInternalServerError(w, err)
+		return
+	}
+
+	resp := &ChangefeedResp{
+		FeedState: string(feedState),
+	}
+	if cf != nil {
+		resp.RunningError = cf.info.Error
+	} else if feedInfo != nil {
+		resp.RunningError = feedInfo.Error
+	}
+	if status != nil {
+		resp.TSO = status.CheckpointTs
+		tm := oracle.GetTimeFromTS(status.CheckpointTs)
+		resp.Checkpoint = tm.Format("2006-01-02 15:04:05.000")
+	}
+	writeData(w, resp)
 }

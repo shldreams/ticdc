@@ -26,7 +26,6 @@ function run() {
     TOPIC_NAME="ticdc-sink-retry-test-$RANDOM"
     case $SINK_TYPE in
         kafka) SINK_URI="kafka://127.0.0.1:9092/$TOPIC_NAME?partition-num=4";;
-        mysql) ;&
         *) SINK_URI="mysql://root@127.0.0.1:3306/?max-txn-row=1";;
     esac
     sort_dir="$WORK_DIR/file_sort_cache"
@@ -46,6 +45,14 @@ function run() {
     go-ycsb load mysql -P $CUR/conf/workload -p mysql.host=${UP_TIDB_HOST} -p mysql.port=${UP_TIDB_PORT} -p mysql.user=root -p mysql.db=file_sort
     run_sql "CREATE table file_sort.check2(id int primary key);"
     check_table_exists "file_sort.check2" ${DOWN_TIDB_HOST} ${DOWN_TIDB_PORT} 90
+    check_sync_diff $WORK_DIR $CUR/conf/diff_config.toml
+
+    run_sql "create table file_sort.USERTABLE2 like file_sort.USERTABLE"
+    run_sql "insert into file_sort.USERTABLE2 select * from file_sort.USERTABLE"
+    run_sql "create table file_sort.check3(id int primary key);"
+    check_table_exists "file_sort.USERTABLE2" ${DOWN_TIDB_HOST} ${DOWN_TIDB_PORT}
+    check_table_exists "file_sort.check3" ${DOWN_TIDB_HOST} ${DOWN_TIDB_PORT} 90
+
     check_sync_diff $WORK_DIR $CUR/conf/diff_config.toml
 
     cleanup_process $CDC_BINARY
